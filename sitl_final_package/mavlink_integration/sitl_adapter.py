@@ -30,7 +30,7 @@ class SITLAdapter:
 
     def initialize(self):
         self.interface.connect()
-        self.master = connect_to_drone(self.connection_str)
+        self.master = self.interface.get_master()
         self.boot_time = time.time()
 
         def set_msg_interval(msg_id, us_interval=1000000):
@@ -84,8 +84,7 @@ class SITLAdapter:
         return takeoff(self.master, altitude)
 
     def goto_position(self, lat, lon, alt):
-        wait_until_position_reached(self, lat, lon, alt)
-        return True
+        return wait_until_position_reached(self, lat, lon, alt)
 
     def land(self, wait_for_land=True):
         land_drone(self.master)

@@ -549,6 +549,22 @@
             border-color: var(--accent-teal);
         }
 
+        .mission-select {
+            min-width: 168px;
+            padding: 5px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: #0d1219;
+            color: var(--text-main);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.72rem;
+        }
+
+        .mission-select:focus {
+            outline: none;
+            border-color: var(--accent-teal);
+        }
+
         /* Formation distance display */
         .distance-grid {
             display: grid;
@@ -646,6 +662,14 @@
                             <i class="fa-solid fa-arrow-down"></i>
                             LAND ALL
                         </button>
+                    </div>
+                    <div class="altitude-input-wrap">
+                        <label for="mission-select">MISSION:</label>
+                        <select id="mission-select" class="mission-select">
+                            <option value="1">Mission 1 (Default)</option>
+                            <option value="2">Mission 2 (Square)</option>
+                            <option value="3">Mission 3 (Circle)</option>
+                        </select>
                     </div>
                     <div class="altitude-input-wrap">
                         <label for="alt-input">ALTITUDE:</label>
@@ -1121,11 +1145,26 @@
             apiCall('/api/swarm/arm_all', {}, 'btn-arm-all', 'ARM ALL');
         }
 
+        function getSelectedMissionId() {
+            return parseInt(document.getElementById('mission-select').value, 10) || 1;
+        }
+
+        function getSelectedMissionLabel() {
+            const select = document.getElementById('mission-select');
+            return select.options[select.selectedIndex].text;
+        }
+
         function cmdTakeoffAll() {
             const alt = parseFloat(document.getElementById('alt-input').value) || 10;
+            const missionId = getSelectedMissionId();
             commandedAltitude = alt;
             document.getElementById('val-alt-target').innerText = alt;
-            apiCall('/api/swarm/takeoff_all', { altitude: alt }, 'btn-takeoff-all', `TAKEOFF ALL (${alt}m)`);
+            apiCall(
+                '/api/swarm/takeoff_all',
+                { altitude: alt, mission_id: missionId },
+                'btn-takeoff-all',
+                `TAKEOFF ALL (${getSelectedMissionLabel()}, ${alt}m)`
+            );
         }
 
         function cmdLandAll() {
@@ -1146,9 +1185,15 @@
         function cmdTakeoffOne() {
             if (!activeDroneId) { logConsole('CMD', '⚠ No drone selected'); return; }
             const alt = parseFloat(document.getElementById('alt-input-one').value) || 10;
+            const missionId = getSelectedMissionId();
             commandedAltitude = alt;
             document.getElementById('val-alt-target').innerText = alt;
-            apiCall(`/api/drone/${activeDroneId}/takeoff`, { altitude: alt }, 'btn-takeoff-one', `TAKEOFF ${activeDroneId.toUpperCase()} (${alt}m)`);
+            apiCall(
+                `/api/drone/${activeDroneId}/takeoff`,
+                { altitude: alt, mission_id: missionId },
+                'btn-takeoff-one',
+                `TAKEOFF ${activeDroneId.toUpperCase()} (${getSelectedMissionLabel()}, ${alt}m)`
+            );
         }
 
         function cmdLandOne() {

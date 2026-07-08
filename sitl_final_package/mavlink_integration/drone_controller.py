@@ -212,6 +212,51 @@ def wait_until_position_reached(adapter, target_lat, target_lon, target_alt, thr
     logging.info(f"[{adapter.drone_id}] ✈️ Drone is en route to target...")
 
 
+def wait_until_position_reached(adapter, target_lat, target_lon, target_alt, threshold=4.0, timeout=None):
+    """
+    Stream position targets until the vehicle reaches this waypoint.
+    Mission execution runs in a background thread, so waiting here lets shape
+    missions visit every corner/point instead of jumping straight to the final
+    waypoint.
+    """
+    master = adapter.master
+    boot_time = adapter.boot_time
+
+    logging.info(f"[{adapter.drone_id}] Navigating to waypoint: lat={target_lat}, lon={target_lon}, alt={target_alt}m")
+
+    last_distance = None
+    pos = master.messages.get('GLOBAL_POSITION_INT')
+    if pos:
+        current_lat = pos.lat / 1e7
+        current_lon = pos.lon / 1e7
+        last_distance = calculate_distance_meters(current_lat, current_lon, target_lat, target_lon)
+
+    if timeout is None:
+        timeout = 90.0 if last_distance is None else max(30.0, min(180.0, (last_distance / 4.0) + 20.0))
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        send_position_target(master, boot_time, target_lat, target_lon, target_alt)
+
+        msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=0.5)
+        if msg:
+            current_lat = msg.lat / 1e7
+            current_lon = msg.lon / 1e7
+            current_alt = msg.relative_alt / 1000.0
+            last_distance = calculate_distance_meters(current_lat, current_lon, target_lat, target_lon)
+            logging.info(f"[{adapter.drone_id}] Distance to waypoint: {last_distance:.1f}m, alt={current_alt:.1f}m")
+
+            if last_distance <= threshold and abs(current_alt - target_alt) <= 3.0:
+                logging.info(f"[{adapter.drone_id}] Waypoint reached")
+                return True
+
+    logging.warning(
+        f"[{adapter.drone_id}] Waypoint timeout after {timeout:.0f}s "
+        f"(last distance: {last_distance if last_distance is not None else 'unknown'}m)"
+    )
+    return False
+
+
 def land_drone(master):
     """Send land command by changing mode to LAND, retrying up to 3 times."""
     try:

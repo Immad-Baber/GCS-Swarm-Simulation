@@ -212,12 +212,13 @@ async def api_swarm_arm_all():
 async def api_swarm_takeoff_all():
     """
     Takeoff all connected drones.
-    Body: {"altitude": 10}
+    Body: {"altitude": 10, "mission_id": 1}
     """
     data = await request.get_json(force=True, silent=True) or {}
     altitude = float(data.get("altitude", 10))
-    logging.info(f"[API] /api/swarm/takeoff_all — altitude={altitude}")
-    results = await _run_in_thread(swarm_mgr.takeoff_all, altitude)
+    mission_id = int(data.get("mission_id", 1))
+    logging.info(f"[API] /api/swarm/takeoff_all — altitude={altitude}, mission_id={mission_id}")
+    results = await _run_in_thread(swarm_mgr.takeoff_all, altitude, mission_id)
     return {"status": "ok", "results": {k: bool(v) for k, v in results.items()}}
 
 
@@ -243,12 +244,13 @@ async def api_drone_arm(drone_id):
 async def api_drone_takeoff(drone_id):
     """
     Takeoff a specific drone.
-    Body: {"altitude": 10}
+    Body: {"altitude": 10, "mission_id": 1}
     """
     data = await request.get_json(force=True, silent=True) or {}
     altitude = float(data.get("altitude", 10))
-    logging.info(f"[API] /api/drone/{drone_id}/takeoff — altitude={altitude}")
-    result = await _run_in_thread(swarm_mgr.takeoff_drone, drone_id, altitude)
+    mission_id = int(data.get("mission_id", 1))
+    logging.info(f"[API] /api/drone/{drone_id}/takeoff — altitude={altitude}, mission_id={mission_id}")
+    result = await _run_in_thread(swarm_mgr.takeoff_drone, drone_id, altitude, mission_id)
     return {"status": "ok", "drone_id": drone_id, "takeoff": bool(result)}
 
 

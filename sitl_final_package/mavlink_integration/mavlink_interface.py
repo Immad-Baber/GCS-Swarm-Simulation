@@ -9,11 +9,17 @@ class MAVLinkInterface:
     def connect(self):
         print(f"[INFO] Connecting to {self.connection_str}...")
         self.master = mavutil.mavlink_connection(self.connection_str)
-        self.wait_heartbeat()
+        try:
+            self.wait_heartbeat()
+        except Exception:
+            self.close()
+            raise
 
-    def wait_heartbeat(self):
+    def wait_heartbeat(self, timeout=30):
         print("[INFO] Waiting for heartbeat...")
-        self.master.wait_heartbeat()
+        heartbeat = self.master.wait_heartbeat(timeout=timeout)
+        if heartbeat is None:
+            raise TimeoutError(f"No heartbeat from {self.connection_str} within {timeout}s")
         print(f"[INFO] Heartbeat received from system {self.master.target_system}, component {self.master.target_component}")
 
     def send_command_long(self, command, params):
@@ -34,3 +40,8 @@ class MAVLinkInterface:
 
     def get_master(self):
         return self.master
+
+    def close(self):
+        if self.master is not None:
+            self.master.close()
+            self.master = None

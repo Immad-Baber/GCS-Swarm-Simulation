@@ -40,6 +40,7 @@ class SwarmManager:
         Connect and initialize a single drone.
         Returns True on success, False on failure.
         """
+        adapter = None
         try:
             logging.info(f"[SwarmManager] Connecting {drone_id} via {connection_str} ...")
             adapter = SITLAdapter(drone_id, connection_str)
@@ -49,6 +50,8 @@ class SwarmManager:
             logging.info(f"[SwarmManager] ✅ {drone_id} connected and initialized")
             return True
         except Exception as e:
+            if adapter is not None and adapter.interface is not None:
+                adapter.interface.close()
             logging.error(f"[SwarmManager] ❌ Failed to add {drone_id}: {e}")
             return False
 
@@ -63,8 +66,8 @@ class SwarmManager:
             futures = {}
             for i in range(num_drones):
                 drone_id = f"drone_{i + 1}"
-                port = 14551 + i
-                connection_str = f"udp:127.0.0.1:{port}"
+                port = 5762 + (i * 10)
+                connection_str = f"tcp:127.0.0.1:{port}"
                 futures[pool.submit(self.add_drone, drone_id, connection_str)] = drone_id
 
             for future in as_completed(futures):
@@ -113,6 +116,116 @@ class SwarmManager:
         logging.info(f"[SwarmManager] {fn_name} → {results}")
         return results
 
+    def _offset_waypoint(self, lat, lon, north_m, east_m, altitude):
+        import math
+
+        lat_deg_per_meter = 1.0 / 111320.0
+        lon_deg_per_meter = 1.0 / (111320.0 * math.cos(math.radians(lat)))
+        return {
+            "latitude": lat + north_m * lat_deg_per_meter,
+            "longitude": lon + east_m * lon_deg_per_meter,
+            "altitude": altitude,
+        }
+
+    def _build_shape_waypoints(self, mission_id: int, altitude: float):
+        import math
+
+        center_lat = 33.665137
+        center_lon = 73.027023
+
+        if mission_id == 2:
+            half_side = 55.0
+            corners = [
+                (half_side, -half_side),
+                (half_side, half_side),
+                (-half_side, half_side),
+                (-half_side, -half_side),
+                (half_side, -half_side),
+            ]
+            return [
+                self._offset_waypoint(center_lat, center_lon, north, east, altitude)
+                for north, east in corners
+            ]
+
+        if mission_id == 3:
+            radius = 70.0
+            points = []
+            for idx in range(16):
+                angle = (2.0 * math.pi * idx) / 16.0
+                points.append(
+                    self._offset_waypoint(
+                        center_lat,
+                        center_lon,
+                        math.cos(angle) * radius,
+                        math.sin(angle) * radius,
+                        altitude,
+                    )
+                )
+            points.append(points[0].copy())
+            return points
+
+        return None
+
+    def _get_mission_waypoints(self, mission_id: int, altitude: float):
+        import os
+        from waypoint_navigator import WaypointNavigator
+
+        shaped_waypoints = self._build_shape_waypoints(mission_id, altitude)
+        if shaped_waypoints is not None:
+            return shaped_waypoints
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        waypoint_file = os.path.join(script_dir, "waypoints.json")
+        temp_navigator = WaypointNavigator(None)
+        return temp_navigator.load_from_json(waypoint_file)
+
+    def _apply_formation_offset(self, base_waypoints, drone_id):
+        import math
+
+        offsets = {
+            0: (0, 0),
+            1: (-25, -10),
+            2: (25, -10),
+            3: (-50, -20),
+            4: (50, -20),
+            5: (0, -20),
+            6: (-75, -30),
+            7: (75, -30),
+            8: (-25, -30),
+            9: (25, -30),
+        }
+
+        try:
+            drone_idx = int(drone_id.split("_")[1]) - 1
+        except Exception:
+            drone_idx = 0
+
+        lat1, lon1 = 33.6844, 73.0479
+        lat2 = base_waypoints[0]["latitude"]
+        lon2 = base_waypoints[0]["longitude"]
+        dy_path = lat2 - lat1
+        dx_path = (lon2 - lon1) * math.cos(math.radians(lat1))
+        bearing = math.atan2(dx_path, dy_path)
+
+        dx_body, dy_body = offsets.get(drone_idx, (0, 0))
+        dx = dx_body * math.cos(bearing) + dy_body * math.sin(bearing)
+        dy = -dx_body * math.sin(bearing) + dy_body * math.cos(bearing)
+
+        lat_deg_per_meter = 1.0 / 111320.0
+        base_lat = base_waypoints[0]["latitude"]
+        lon_deg_per_meter = 1.0 / (111320.0 * math.cos(math.radians(base_lat)))
+        offset_lat = dy * lat_deg_per_meter
+        offset_lon = dx * lon_deg_per_meter
+
+        return [
+            {
+                "latitude": wp["latitude"] + offset_lat,
+                "longitude": wp["longitude"] + offset_lon,
+                "altitude": wp["altitude"],
+            }
+            for wp in base_waypoints
+        ]
+
     def arm_all(self) -> dict:
         """
         Set GUIDED mode and arm every connected drone concurrently.
@@ -151,39 +264,20 @@ class SwarmManager:
         logging.info(f"[SwarmManager] arm_all → {results}")
         return results
 
-    def takeoff_all(self, altitude: float = 10.0) -> dict:
+    def takeoff_all(self, altitude: float = 10.0, mission_id: int = 1) -> dict:
         """Takeoff every connected drone to *altitude* meters and start mission."""
         results = {}
         with self._lock:
             drone_items = list(self.drones.items())
 
         import threading
-        import os
-        import math
         from waypoint_navigator import WaypointNavigator
 
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-        WAYPOINT_FILE = os.path.join(SCRIPT_DIR, "waypoints.json")
-
-        temp_navigator = WaypointNavigator(None)
         try:
-            base_waypoints = temp_navigator.load_from_json(WAYPOINT_FILE)
+            base_waypoints = self._get_mission_waypoints(int(mission_id), altitude)
         except Exception as e:
             logging.error(f"❌ Failed to load waypoints: {e}")
             base_waypoints = []
-
-        OFFSETS = {
-            0: (0,    0),
-            1: (-25, -10),
-            2: (25,  -10),
-            3: (-50, -20),
-            4: (50,  -20),
-            5: (0,   -20),
-            6: (-75, -30),
-            7: (75,  -30),
-            8: (-25, -30),
-            9: (25,  -30),
-        }
 
         def _mission_worker(drone_id, adapter, waypoints):
             logging.info(f"[{drone_id}] Starting waypoint navigation...")
@@ -200,37 +294,7 @@ class SwarmManager:
                 logging.info(f"[SwarmManager] {'✅' if ok else '❌'} {drone_id} takeoff({'ok' if ok else 'fail'})")
                 
                 if ok and base_waypoints:
-                    # Calculate drone-specific waypoints
-                    try:
-                        drone_idx = int(drone_id.split('_')[1]) - 1
-                    except:
-                        drone_idx = 0
-
-                    lat_deg_per_meter = 1.0 / 111320.0
-                    base_lat = base_waypoints[0]["latitude"]
-                    lon_deg_per_meter = 1.0 / (111320.0 * math.cos(math.radians(base_lat)))
-
-                    lat1, lon1 = 33.6844, 73.0479
-                    lat2 = base_waypoints[0]["latitude"]
-                    lon2 = base_waypoints[0]["longitude"]
-                    dy_path = lat2 - lat1
-                    dx_path = (lon2 - lon1) * math.cos(math.radians(lat1))
-                    bearing = math.atan2(dx_path, dy_path)
-
-                    dx_body, dy_body = OFFSETS.get(drone_idx, (0, 0))
-                    dx = dx_body * math.cos(bearing) + dy_body * math.sin(bearing)
-                    dy = -dx_body * math.sin(bearing) + dy_body * math.cos(bearing)
-
-                    offset_lat = dy * lat_deg_per_meter
-                    offset_lon = dx * lon_deg_per_meter
-
-                    drone_waypoints = []
-                    for wp in base_waypoints:
-                        drone_waypoints.append({
-                            "latitude":  wp["latitude"]  + offset_lat,
-                            "longitude": wp["longitude"] + offset_lon,
-                            "altitude":  wp["altitude"]
-                        })
+                    drone_waypoints = self._apply_formation_offset(base_waypoints, drone_id)
 
                     # Start mission in a background thread so takeoff_all can return
                     threading.Thread(target=_mission_worker, args=(drone_id, adapter, drone_waypoints), daemon=True).start()
@@ -251,7 +315,7 @@ class SwarmManager:
                 except Exception as e:
                     results[did] = False
 
-        logging.info(f"[SwarmManager] takeoff_all({altitude}m) → {results}")
+        logging.info(f"[SwarmManager] takeoff_all({altitude}m, mission={mission_id}) → {results}")
         return results
 
     def land_all(self) -> dict:
@@ -308,7 +372,7 @@ class SwarmManager:
             logging.error(f"[SwarmManager] arm_drone {drone_id} error: {e}")
             return False
 
-    def takeoff_drone(self, drone_id: str, altitude: float = 10.0) -> bool:
+    def takeoff_drone(self, drone_id: str, altitude: float = 10.0, mission_id: int = 1) -> bool:
         """Takeoff a single drone by ID and start mission."""
         adapter = self.get_adapter(drone_id)
         if adapter is None:
@@ -316,32 +380,13 @@ class SwarmManager:
             return False
 
         import threading
-        import os
-        import math
         from waypoint_navigator import WaypointNavigator
 
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-        WAYPOINT_FILE = os.path.join(SCRIPT_DIR, "waypoints.json")
-
-        temp_navigator = WaypointNavigator(None)
         try:
-            base_waypoints = temp_navigator.load_from_json(WAYPOINT_FILE)
+            base_waypoints = self._get_mission_waypoints(int(mission_id), altitude)
         except Exception as e:
             logging.error(f"❌ Failed to load waypoints: {e}")
             base_waypoints = []
-
-        OFFSETS = {
-            0: (0,    0),
-            1: (-25, -10),
-            2: (25,  -10),
-            3: (-50, -20),
-            4: (50,  -20),
-            5: (0,   -20),
-            6: (-75, -30),
-            7: (75,  -30),
-            8: (-25, -30),
-            9: (25,  -30),
-        }
 
         def _mission_worker(d_id, adp, waypoints):
             logging.info(f"[{d_id}] Starting waypoint navigation...")
@@ -357,36 +402,7 @@ class SwarmManager:
             logging.info(f"[SwarmManager] {'✅' if ok else '❌'} {drone_id} takeoff({altitude}m) individual")
             
             if ok and base_waypoints:
-                try:
-                    drone_idx = int(drone_id.split('_')[1]) - 1
-                except:
-                    drone_idx = 0
-
-                lat_deg_per_meter = 1.0 / 111320.0
-                base_lat = base_waypoints[0]["latitude"]
-                lon_deg_per_meter = 1.0 / (111320.0 * math.cos(math.radians(base_lat)))
-
-                lat1, lon1 = 33.6844, 73.0479
-                lat2 = base_waypoints[0]["latitude"]
-                lon2 = base_waypoints[0]["longitude"]
-                dy_path = lat2 - lat1
-                dx_path = (lon2 - lon1) * math.cos(math.radians(lat1))
-                bearing = math.atan2(dx_path, dy_path)
-
-                dx_body, dy_body = OFFSETS.get(drone_idx, (0, 0))
-                dx = dx_body * math.cos(bearing) + dy_body * math.sin(bearing)
-                dy = -dx_body * math.sin(bearing) + dy_body * math.cos(bearing)
-
-                offset_lat = dy * lat_deg_per_meter
-                offset_lon = dx * lon_deg_per_meter
-
-                drone_waypoints = []
-                for wp in base_waypoints:
-                    drone_waypoints.append({
-                        "latitude":  wp["latitude"]  + offset_lat,
-                        "longitude": wp["longitude"] + offset_lon,
-                        "altitude":  wp["altitude"]
-                    })
+                drone_waypoints = self._apply_formation_offset(base_waypoints, drone_id)
 
                 threading.Thread(target=_mission_worker, args=(drone_id, adapter, drone_waypoints), daemon=True).start()
 
